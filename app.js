@@ -53,12 +53,23 @@
   }
 
   function isValidAccessCode(code) {
-    return code.startsWith("14") && code.length >= 5;
+    // Must start with 14; any length after that is fine (overall > 2 chars)
+    return code.startsWith("14") && code.length > 2;
   }
 
-  function scrollThreadToEnd() {
+  let stickToBottom = true;
+
+  function isNearBottom() {
+    const el = messagesEl;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+  }
+
+  function scrollThreadToEnd(force) {
+    if (!force && !stickToBottom) return;
     requestAnimationFrame(() => {
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      stickToBottom = true;
     });
   }
 
@@ -67,15 +78,20 @@
     if (vv) {
       document.documentElement.style.setProperty(
         "--app-height",
-        Math.max(240, Math.round(vv.height)) + "px"
+        Math.max(200, Math.round(vv.height)) + "px"
+      );
+      document.documentElement.style.setProperty(
+        "--vv-top",
+        Math.round(vv.offsetTop) + "px"
       );
     } else {
       document.documentElement.style.setProperty(
         "--app-height",
         Math.round(window.innerHeight) + "px"
       );
+      document.documentElement.style.setProperty("--vv-top", "0px");
     }
-    if (!chatEl.hidden) scrollThreadToEnd();
+    if (!chatEl.hidden && stickToBottom) scrollThreadToEnd(true);
   }
 
   function uuid() {
@@ -251,7 +267,8 @@
     }
 
     messagesEl.appendChild(el);
-    scrollThreadToEnd();
+    // WhatsApp-style: stick to bottom for your sends / system, or if user is already at bottom
+    scrollThreadToEnd(kind === "mine" || kind === "system" || stickToBottom);
     return el;
   }
 
@@ -629,11 +646,12 @@
     );
     syncViewport();
 
+    stickToBottom = true;
     startPolling();
     becomeHost(hostId);
     setComposerEnabled(true);
     refreshStatus();
-    scrollThreadToEnd();
+    scrollThreadToEnd(true);
   }
 
   joinForm.addEventListener("submit", async (e) => {
@@ -699,9 +717,17 @@
     syncViewport();
     window.setTimeout(() => {
       syncViewport();
-      scrollThreadToEnd();
+      scrollThreadToEnd(true);
     }, 300);
   });
+
+  messagesEl.addEventListener(
+    "scroll",
+    () => {
+      stickToBottom = isNearBottom();
+    },
+    { passive: true }
+  );
 
   // Enter sends (single-line input)
   messageInput.addEventListener("keydown", (e) => {
