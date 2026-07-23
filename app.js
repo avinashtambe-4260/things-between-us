@@ -75,22 +75,14 @@
 
   function syncViewport() {
     const vv = window.visualViewport;
-    if (vv) {
-      document.documentElement.style.setProperty(
-        "--app-height",
-        Math.max(200, Math.round(vv.height)) + "px"
-      );
-      document.documentElement.style.setProperty(
-        "--vv-top",
-        Math.round(vv.offsetTop) + "px"
-      );
-    } else {
-      document.documentElement.style.setProperty(
-        "--app-height",
-        Math.round(window.innerHeight) + "px"
-      );
-      document.documentElement.style.setProperty("--vv-top", "0px");
-    }
+    const height = vv
+      ? Math.max(220, Math.round(vv.height))
+      : Math.round(window.innerHeight || document.documentElement.clientHeight);
+    const top = vv ? Math.round(vv.offsetTop) : 0;
+
+    document.documentElement.style.setProperty("--app-height", height + "px");
+    document.documentElement.style.setProperty("--vv-top", top + "px");
+
     if (!chatEl.hidden && stickToBottom) scrollThreadToEnd(true);
   }
 
@@ -636,7 +628,7 @@
     gateEl.hidden = true;
     chatEl.hidden = false;
     document.body.classList.add("in-room");
-    chatTitle.textContent = code;
+    chatTitle.textContent = "Private room";
     clearMessages();
     setComposerEnabled(false);
     showGateError("");

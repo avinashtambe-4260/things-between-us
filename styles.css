@@ -313,18 +313,25 @@ body.in-room .shell {
   display: none !important;
 }
 
-/* —— Chat room (WhatsApp-style scroll shell) —— */
+/* —— Chat room (responsive, WhatsApp-like) —— */
 .chat {
   position: fixed;
+  top: var(--vv-top, 0px);
   left: 0;
   right: 0;
-  top: var(--vv-top, 0px);
   height: var(--app-height, 100dvh);
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
   z-index: 5;
+  overflow: hidden;
+  box-sizing: border-box;
+  padding-top: max(0.5rem, env(safe-area-inset-top, 0px));
+  padding-right: max(0px, env(safe-area-inset-right, 0px));
+  padding-bottom: max(0px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(0px, env(safe-area-inset-left, 0px));
   animation: rise 0.35s ease both;
   touch-action: manipulation;
 }
@@ -351,25 +358,30 @@ body.in-room .shell {
 .chat-shell {
   position: relative;
   z-index: 1;
+  box-sizing: border-box;
   width: 100%;
   max-width: var(--max);
   margin: 0 auto;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 0.75rem 0.85rem calc(0.55rem + env(safe-area-inset-bottom, 0px));
-  gap: 0.5rem;
+  padding: 0.5rem 0.85rem 0.55rem;
+  gap: 0.45rem;
+  overflow: hidden;
 }
 
 .chat-header {
   display: flex;
-  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.65rem;
-  padding: 0.35rem 0 0.65rem;
+  gap: 0.5rem;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.15rem 0 0.55rem;
   border-bottom: 1px solid var(--ink-line);
   flex-shrink: 0;
 }
@@ -379,7 +391,8 @@ body.in-room .shell {
   flex-direction: column;
   gap: 0.1rem;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .brand {
@@ -391,16 +404,19 @@ body.in-room .shell {
 }
 
 .brand-sm {
-  font-size: 1.2rem;
+  font-size: clamp(1rem, 4.5vw, 1.25rem);
   font-weight: 600;
   color: #f0a8b8;
-  line-height: 1.2;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .room-label {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: 0.95rem;
+  font-family: var(--font);
+  font-size: 0.78rem;
   font-weight: 500;
   color: var(--mist-muted);
   white-space: nowrap;
@@ -411,20 +427,22 @@ body.in-room .shell {
 .chat-meta {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 
 .status {
   margin: 0;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 500;
   color: var(--amber);
-  padding: 0.25rem 0.5rem;
+  padding: 0.28rem 0.45rem;
   background: var(--amber-soft);
   border-radius: 4px;
-  max-width: 9.5rem;
   white-space: nowrap;
+  max-width: 6.5rem;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -446,10 +464,12 @@ body.in-room .shell {
 .chat .btn-ghost {
   background: transparent;
   color: var(--mist-muted);
-  border-color: var(--ink-line);
-  padding: 0.45rem 0.7rem;
-  font-size: 0.85rem;
+  border: 1px solid var(--ink-line);
+  padding: 0.4rem 0.65rem;
+  font-size: 0.8rem;
   font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .chat .btn-ghost:hover:not(:disabled) {
@@ -460,6 +480,7 @@ body.in-room .shell {
 .messages {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -467,34 +488,39 @@ body.in-room .shell {
   touch-action: pan-y;
   display: flex;
   flex-direction: column;
-  gap: 0.55rem;
-  padding: 0.65rem 0.15rem;
+  gap: 0.5rem;
+  padding: 0.55rem 0.1rem;
   scroll-behavior: smooth;
 }
 
 .msg {
-  max-width: 85%;
-  padding: 0.55rem 0.8rem;
-  border-radius: var(--radius);
-  font-size: 0.95rem;
+  max-width: min(85%, 22rem);
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  font-size: 0.92rem;
+  line-height: 1.4;
   word-wrap: break-word;
   overflow-wrap: anywhere;
   animation: msg-in 0.25s ease both;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .msg-meta {
   display: block;
-  font-size: 0.7rem;
-  font-weight: 500;
-  margin-bottom: 0.2rem;
-  opacity: 0.75;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: 0.15rem;
+  opacity: 0.65;
 }
 
 .msg-mine {
   align-self: flex-end;
   background: var(--leaf-dim);
   color: var(--mist);
+  border-bottom-right-radius: 4px;
 }
 
 .msg-mine.is-pending {
@@ -506,39 +532,44 @@ body.in-room .shell {
   align-self: flex-start;
   background: var(--ink-elevated);
   border: 1px solid var(--ink-line);
+  border-bottom-left-radius: 4px;
 }
 
 .msg-system {
   align-self: center;
   max-width: 95%;
   text-align: center;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: var(--mist-muted);
   background: transparent;
-  padding: 0.35rem 0.5rem;
+  border: none;
+  padding: 0.25rem 0.4rem;
 }
 
 .send-form {
   display: flex;
-  gap: 0.5rem;
-  padding-top: 0.55rem;
+  align-items: stretch;
+  gap: 0.45rem;
+  padding-top: 0.5rem;
   border-top: 1px solid var(--ink-line);
   flex-shrink: 0;
-  background: rgba(12, 20, 18, 0.92);
-  backdrop-filter: blur(8px);
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
 }
 
 .send-form input[type="text"] {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   width: auto;
-  padding: 0.75rem 0.9rem;
+  padding: 0.7rem 0.8rem;
   font-family: var(--font);
-  font-size: 16px; /* avoids iOS zoom on focus */
+  font-size: 16px; /* prevents iOS zoom */
   color: var(--mist);
   background: var(--ink-elevated);
   border: 1px solid var(--ink-line);
-  border-radius: var(--radius);
+  border-radius: 10px;
   outline: none;
   transition: border-color var(--ease), box-shadow var(--ease);
 }
@@ -561,9 +592,10 @@ body.in-room .shell {
 .chat .btn-primary {
   background: var(--leaf);
   color: #04100c;
-  align-self: stretch;
-  flex-shrink: 0;
-  padding: 0.7rem 1rem;
+  flex: 0 0 auto;
+  padding: 0.7rem 0.95rem;
+  border-radius: 10px;
+  white-space: nowrap;
 }
 
 .chat .btn-primary:hover:not(:disabled) {
@@ -609,36 +641,54 @@ body.in-room .shell {
     display: none;
   }
 
-  body:not(.in-room) .shell {
-    padding: 0 10px;
+  body:not(.in-room) {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
 
+  body:not(.in-room) .shell {
+    padding: 0 12px;
+    min-height: calc(var(--app-height) - var(--topbar));
+    height: auto;
+    overflow: visible;
+  }
+
   .gate {
-    padding: 16px 0 24px;
+    padding: 16px 0 28px;
     align-items: flex-start;
   }
 
   .access-card {
-    margin-top: 12px;
+    margin-top: 8px;
+    width: 100%;
   }
 
   .chat-shell {
-    padding-left: 0.65rem;
-    padding-right: 0.65rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
   }
 
-  .chat-header {
-    flex-wrap: wrap;
+  /* Stack status under actions on very narrow screens if needed */
+  .chat-meta {
+    gap: 0.35rem;
   }
 
   .status {
-    max-width: 100%;
+    max-width: 5.75rem;
   }
 
   .msg {
-    max-width: 92%;
+    max-width: 88%;
+  }
+}
+
+@media (max-width: 380px) {
+  .status {
+    display: none; /* leave + title stay readable */
+  }
+
+  .brand-sm {
+    font-size: 1.05rem;
   }
 }
 
