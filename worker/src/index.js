@@ -142,13 +142,21 @@ async function postMessage(request, env, roomHash) {
     ts: ts == null ? Date.now() : ts,
   };
 
-  // Retry read-modify-write so concurrent posts rarely clobber each other
+  // Retry read-modify-write. Merge by id so a concurrent ACK can't be
+  // undone by a stale POST that re-appends already-removed messages.
   for (let attempt = 0; attempt < 8; attempt++) {
     const current = await readInbox(env, roomHash);
-    if (current.some((m) => m && m.id === id)) {
+    const byId = new Map();
+    for (const m of current) {
+      if (m && m.id) byId.set(m.id, m);
+    }
+    if (byId.has(id)) {
       return json({ ok: true, duplicate: true });
     }
-    const next = current.concat([entry]).slice(-MAX_MESSAGES);
+    byId.set(id, entry);
+    const next = Array.from(byId.values())
+      .sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0))
+      .slice(-MAX_MESSAGES);
     await writeInbox(env, roomHash, next);
     const verify = await readInbox(env, roomHash);
     if (verify.some((m) => m && m.id === id)) {

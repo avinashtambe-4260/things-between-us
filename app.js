@@ -41,7 +41,7 @@
   let pollTimer = null;
   let mailboxOk = true;
 
-  /** @type {Map<string, { id: string, text: string, delivered: boolean }>} */
+  /** @type {Map<string, { id: string, text: string, payload: object, delivered: boolean }>} */
   const myPending = new Map();
   const seenIncoming = new Set();
 
@@ -440,6 +440,17 @@
     }
   }
 
+  /** Resend anything still waiting when the live link comes back */
+  function flushPendingLive() {
+    if (!isPeerLive()) return 0;
+    let n = 0;
+    myPending.forEach((entry) => {
+      if (entry.delivered || !entry.payload) return;
+      if (sendPacket(entry.payload)) n += 1;
+    });
+    return n;
+  }
+
   async function handlePeerData(data) {
     let packet = data;
     if (typeof data === "string") {
@@ -453,6 +464,8 @@
 
     if (packet.type === "ack" && Array.isArray(packet.ids)) {
       markMineDelivered(packet.ids);
+      // Clear from mailbox so they don't linger / get resurrected by races
+      mailboxAck(packet.ids).catch(function () {});
       return;
     }
 
@@ -488,6 +501,16 @@
 
     c.on("open", () => {
       appendMessage("Connected — live link ready.", "system");
+      const flushed = flushPendingLive();
+      if (flushed > 0) {
+        appendMessage(
+          flushed === 1
+            ? "Delivering 1 saved message…"
+            : "Delivering " + flushed + " saved messages…",
+          "system"
+        );
+      }
+      pollMailbox();
       refreshStatus();
     });
 
@@ -715,12 +738,17 @@
 
     try {
       const payload = await encryptText(text);
-      myPending.set(payload.id, { id: payload.id, text: text, delivered: false });
+      myPending.set(payload.id, {
+        id: payload.id,
+        text: text,
+        payload: payload,
+        delivered: false,
+      });
       appendMessage(text, "mine", { id: payload.id, pending: true });
       messageInput.value = "";
       messageInput.focus();
       syncViewport();
-      scrollThreadToEnd();
+      scrollThreadToEnd(true);
 
       try {
         await mailboxPost(payload);
