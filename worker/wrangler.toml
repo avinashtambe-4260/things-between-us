@@ -1,0 +1,8 @@
+﻿name = "cipher-mailbox"
+main = "src/index.js"
+compatibility_date = "2024-11-12"
+
+[[kv_namespaces]]
+binding = "MAILBOX"
+id = "9b7d18392d5e4cc497bdee8881a80dd8"
+preview_id = "4f655ccdffad4dd5b861118984b2aab7"

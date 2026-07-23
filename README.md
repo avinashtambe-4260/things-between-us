@@ -1,18 +1,20 @@
 ﻿# Cipher
 
-Secret two-person chat. Share a code, join the same room, and message with end-to-end AES-GCM encryption. No accounts.
+Secret two-person chat. Share a code, join the same room, message with end-to-end AES-GCM encryption.
 
-**Live:** https://avinashtambe-4260.github.io/cipher-chat/
+**Live app:** https://avinashtambe-4260.github.io/cipher-chat/  
+**Mailbox Worker:** https://cipher-mailbox.cipher-chat.workers.dev
 
 ## How it works
 
 1. Both people enter the same shared chat code.
-2. You can **send immediately** — the other person does not need to be online yet.
-3. Undelivered messages wait in an encrypted outbox (kept in this browser until delivered or you leave).
-4. When your peer joins, saved messages are delivered and marked **delivered** once they ACK (read) them.
-5. Leaving the room clears the conversation (secret / ephemeral — nothing stays on a server).
+2. You can **send immediately** — the other person can be offline.
+3. Ciphertext is stored in a **Cloudflare Worker + KV mailbox** (24h TTL).
+4. When they open the same room, they receive waiting messages and **ACK** them (deleted from the mailbox).
+5. PeerJS is an optional live link when both are online; the mailbox is the source of truth.
+6. Leaving clears *your* screen; undelivered messages remain in the mailbox for the peer.
 
-Under the hood: PeerJS connects the two browsers; a shared AES-GCM key is derived from the room code (PBKDF2).
+Only ciphertext is stored. The room path is `SHA-256` of the code — the Worker never sees plaintext.
 
 ## Local use
 
@@ -20,18 +22,27 @@ Under the hood: PeerJS connects the two browsers; a shared AES-GCM key is derive
 npx --yes serve .
 ```
 
+## Mailbox Worker
+
+```bash
+cd worker
+npx wrangler deploy
+```
+
+Requires a Cloudflare account (free). KV binding `MAILBOX` is configured in `worker/wrangler.toml`.
+
 ## Stack
 
-- Plain HTML / CSS / JS
-- [PeerJS](https://peerjs.com/) 1.5.4 (CDN)
-- Web Crypto API
+- GitHub Pages (static UI)
+- Cloudflare Workers + KV (mailbox)
+- PeerJS (optional realtime)
+- Web Crypto API (AES-GCM)
 
 ## Privacy notes
 
 - Choose a long, uncommon code.
-- Only two participants; a third connection is rejected.
-- Messages that were never delivered are wiped when you leave the room.
-- **Note:** If you close the tab before your peer ever joins, undelivered messages only exist on your device’s outbox for that code (same browser). For true “drop a message and go offline forever” delivery, a small cloud mailbox would be needed — say if you want that next.
+- Only two live PeerJS seats; mailbox works regardless.
+- Abandoned messages expire from KV after 24 hours.
 
 ## License
 

@@ -1,19 +1,20 @@
 ﻿/**
- * Cipher — encrypted secret chat with offline queue
- * - Send anytime after entering a room (peer need not be online yet)
- * - Undelivered messages wait in an outbox and flush when the peer connects
- * - After the peer ACKs (has read them), pending flags clear; leaving wipes the room
- * Host peer id: cipher-v1- + SHA-256(room code)
- * Crypto: PBKDF2 + AES-GCM from room code
+ * Cipher — encrypted secret chat with Cloudflare mailbox
+ * - Messages are encrypted in-browser, then stored in a Worker KV mailbox
+ * - Peer can close the tab; the other person still receives messages later
+ * - After the recipient reads (ACK), messages are deleted from the mailbox
+ * - PeerJS is an optional fast path when both are online
  */
 
 (function () {
   "use strict";
 
+  const MAILBOX_URL = "https://cipher-mailbox.cipher-chat.workers.dev";
   const PEER_PREFIX = "cipher-v1-";
   const PBKDF2_SALT = "cipher-secret-chat-v1";
   const PBKDF2_ITERATIONS = 120000;
-  const OUTBOX_PREFIX = "cipher-outbox-v1:";
+  const CLIENT_KEY = "cipher-client-id-v1";
+  const POLL_MS = 2000;
 
   const gateEl = document.getElementById("gate");
   const chatEl = document.getElementById("chat");
@@ -33,13 +34,15 @@
   let conn = null;
   let cryptoKey = null;
   let roomCode = "";
-  let roomKey = "";
-  let role = null;
+  let roomHash = "";
+  let clientId = "";
   let destroyed = false;
   let guestRetryTimer = null;
-  /** @type {{ id: string, text: string, payload: object, delivered: boolean }[]} */
-  let outbox = [];
-  /** message ids already shown from peer (dedupe) */
+  let pollTimer = null;
+  let mailboxOk = true;
+
+  /** @type {Map<string, { id: string, text: string, delivered: boolean }>} */
+  const myPending = new Map();
   const seenIncoming = new Set();
 
   function normalizeCode(raw) {
@@ -52,6 +55,19 @@
   function uuid() {
     if (crypto.randomUUID) return crypto.randomUUID();
     return "m-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+
+  function getClientId() {
+    try {
+      let id = localStorage.getItem(CLIENT_KEY);
+      if (!id) {
+        id = "c-" + uuid();
+        localStorage.setItem(CLIENT_KEY, id);
+      }
+      return id;
+    } catch (_) {
+      return "c-" + uuid();
+    }
   }
 
   function showGateError(msg) {
@@ -76,20 +92,28 @@
   }
 
   function refreshStatus() {
+    const pending = [...myPending.values()].filter((m) => !m.delivered).length;
     if (isPeerLive()) {
-      setStatus("Connected", "is-ready");
+      if (pending > 0) {
+        setStatus("Live · " + pending + " waiting to be read", "is-ready");
+      } else {
+        setStatus("Connected (live)", "is-ready");
+      }
       return;
     }
-    const pending = outbox.filter((m) => !m.delivered).length;
+    if (!mailboxOk) {
+      setStatus("Mailbox unreachable — retrying…", "is-error");
+      return;
+    }
     if (pending > 0) {
       setStatus(
         pending === 1
-          ? "Waiting — 1 message saved for them"
-          : `Waiting — ${pending} messages saved for them`,
+          ? "Saved in mailbox — waiting for them"
+          : pending + " messages saved in mailbox",
         "is-waiting"
       );
     } else {
-      setStatus("Waiting for peer — you can send now", "is-waiting");
+      setStatus("Room open — send anytime", "is-waiting");
     }
   }
 
@@ -164,7 +188,7 @@
   }
 
   async function decryptPayload(payload) {
-    if (!payload || payload.v !== 1 || !payload.iv || !payload.ct) {
+    if (!payload || !payload.iv || !payload.ct) {
       throw new Error("Invalid payload");
     }
     const plain = await crypto.subtle.decrypt(
@@ -173,54 +197,6 @@
       b64Decode(payload.ct)
     );
     return new TextDecoder().decode(plain);
-  }
-
-  function outboxStorageKey() {
-    return OUTBOX_PREFIX + roomKey;
-  }
-
-  function persistOutbox() {
-    if (!roomKey) return;
-    try {
-      const slim = outbox
-        .filter((m) => !m.delivered)
-        .map((m) => ({
-          id: m.id,
-          text: m.text,
-          payload: m.payload,
-          delivered: false,
-        }));
-      if (slim.length === 0) {
-        localStorage.removeItem(outboxStorageKey());
-      } else {
-        localStorage.setItem(outboxStorageKey(), JSON.stringify(slim));
-      }
-    } catch (err) {
-      console.warn("Could not persist outbox", err);
-    }
-  }
-
-  function loadOutbox() {
-    outbox = [];
-    if (!roomKey) return;
-    try {
-      const raw = localStorage.getItem(outboxStorageKey());
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-      outbox = parsed.filter((m) => m && m.id && m.payload && m.text);
-    } catch (_) {
-      outbox = [];
-    }
-  }
-
-  function clearPersistedOutbox() {
-    if (!roomKey) return;
-    try {
-      localStorage.removeItem(outboxStorageKey());
-    } catch (_) {
-      /* ignore */
-    }
   }
 
   function appendMessage(text, kind, opts) {
@@ -234,7 +210,7 @@
       const meta = document.createElement("span");
       meta.className = "msg-meta";
       if (kind === "mine") {
-        meta.textContent = options.pending ? "You · waiting for them" : "You · delivered";
+        meta.textContent = options.pending ? "You · in mailbox" : "You · read";
       } else {
         meta.textContent = "Peer";
       }
@@ -253,31 +229,133 @@
   }
 
   function markMineDelivered(ids) {
-    const idSet = new Set(ids || []);
-    let changed = false;
-    outbox.forEach((m) => {
-      if (idSet.has(m.id) && !m.delivered) {
-        m.delivered = true;
-        changed = true;
+    (ids || []).forEach((id) => {
+      const entry = myPending.get(id);
+      if (entry) {
+        entry.delivered = true;
+        myPending.delete(id);
       }
-    });
-    idSet.forEach((id) => {
       const el = messagesEl.querySelector('.msg-mine[data-msg-id="' + CSS.escape(id) + '"]');
       if (el) {
         el.classList.remove("is-pending");
         const meta = el.querySelector(".msg-meta");
-        if (meta) meta.textContent = "You · delivered";
+        if (meta) meta.textContent = "You · read";
       }
     });
-    if (changed) {
-      outbox = outbox.filter((m) => !m.delivered);
-      persistOutbox();
-      refreshStatus();
-    }
+    refreshStatus();
   }
 
   function clearMessages() {
     messagesEl.replaceChildren();
+  }
+
+  async function mailboxFetch(path, options) {
+    const res = await fetch(MAILBOX_URL + path, options);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(errText || "Mailbox HTTP " + res.status);
+    }
+    return res.json();
+  }
+
+  async function mailboxPost(payload) {
+    await mailboxFetch("/api/room/" + roomHash + "/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: payload.id,
+        iv: payload.iv,
+        ct: payload.ct,
+        from: clientId,
+        ts: Date.now(),
+      }),
+    });
+  }
+
+  async function mailboxAck(ids) {
+    if (!ids.length) return;
+    await mailboxFetch("/api/room/" + roomHash + "/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ids }),
+    });
+  }
+
+  async function mailboxList() {
+    return mailboxFetch("/api/room/" + roomHash + "/messages", { method: "GET" });
+  }
+
+  async function pollMailbox() {
+    if (destroyed || !roomHash || !cryptoKey) return;
+    try {
+      const data = await mailboxList();
+      mailboxOk = true;
+      const messages = (data && data.messages) || [];
+      const stillMine = new Set();
+      const toAck = [];
+
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        if (!msg || !msg.id) continue;
+
+        if (msg.from === clientId) {
+          stillMine.add(msg.id);
+          continue;
+        }
+
+        if (seenIncoming.has(msg.id)) {
+          toAck.push(msg.id);
+          continue;
+        }
+
+        try {
+          const text = await decryptPayload(msg);
+          seenIncoming.add(msg.id);
+          appendMessage(text, "theirs", { id: msg.id });
+          toAck.push(msg.id);
+        } catch (err) {
+          console.error(err);
+          appendMessage("Could not decrypt a mailbox message.", "system");
+          toAck.push(msg.id);
+        }
+      }
+
+      // My messages no longer in mailbox → peer read them
+      const deliveredIds = [];
+      myPending.forEach((entry, id) => {
+        if (!entry.delivered && !stillMine.has(id)) {
+          deliveredIds.push(id);
+        }
+      });
+      if (deliveredIds.length) markMineDelivered(deliveredIds);
+
+      if (toAck.length) {
+        try {
+          await mailboxAck(toAck);
+        } catch (err) {
+          console.warn("ack failed", err);
+        }
+      }
+
+      refreshStatus();
+    } catch (err) {
+      console.warn(err);
+      mailboxOk = false;
+      refreshStatus();
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollMailbox();
+    pollTimer = window.setInterval(pollMailbox, POLL_MS);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
   }
 
   function sendPacket(obj) {
@@ -291,28 +369,7 @@
     }
   }
 
-  function flushOutbox() {
-    if (!isPeerLive()) return;
-    const pending = outbox.filter((m) => !m.delivered);
-    pending.forEach((m) => {
-      sendPacket(m.payload);
-    });
-    if (pending.length) {
-      appendMessage(
-        pending.length === 1
-          ? "Sent 1 saved message to peer."
-          : "Sent " + pending.length + " saved messages to peer.",
-        "system"
-      );
-    }
-  }
-
-  function sendAcks(ids) {
-    if (!ids.length) return;
-    sendPacket({ v: 1, type: "ack", ids: ids });
-  }
-
-  async function handleIncoming(data) {
+  async function handlePeerData(data) {
     let packet = data;
     if (typeof data === "string") {
       try {
@@ -328,24 +385,19 @@
       return;
     }
 
-    if (packet.type === "sync") {
-      flushOutbox();
-      return;
-    }
-
     if (packet.type === "msg" || (packet.iv && packet.ct)) {
       const id = packet.id || uuid();
       if (seenIncoming.has(id)) {
-        sendAcks([id]);
+        sendPacket({ v: 1, type: "ack", ids: [id] });
         return;
       }
       try {
         const text = await decryptPayload(packet);
         seenIncoming.add(id);
         appendMessage(text, "theirs", { id: id });
-        sendAcks([id]);
-        // Ephemeral: after we've read (shown) their message, tell them via ack;
-        // we keep it on screen until leave — sender dissolves on ack.
+        sendPacket({ v: 1, type: "ack", ids: [id] });
+        // Also remove from mailbox if present
+        mailboxAck([id]).catch(function () {});
       } catch (err) {
         console.error(err);
         appendMessage("Could not decrypt a message.", "system");
@@ -364,26 +416,22 @@
     conn = c;
 
     c.on("open", () => {
-      setStatus("Connected", "is-ready");
-      appendMessage("Peer joined — delivering any saved messages…", "system");
-      flushOutbox();
-      sendPacket({ v: 1, type: "sync" });
+      appendMessage("Live link up — mailbox still keeps messages if someone leaves.", "system");
       refreshStatus();
     });
 
     c.on("data", (data) => {
-      handleIncoming(data);
+      handlePeerData(data);
     });
 
     c.on("close", () => {
       conn = null;
+      appendMessage("Live link closed. Mailbox delivery still works.", "system");
       refreshStatus();
-      appendMessage("Peer left. New messages will wait until they return.", "system");
     });
 
     c.on("error", (err) => {
       console.error(err);
-      setStatus("Connection error", "is-error");
     });
   }
 
@@ -394,18 +442,11 @@
     }
   }
 
-  function destroySession(opts) {
-    const options = opts || {};
+  function destroySession() {
     destroyed = true;
     stopGuestRetry();
+    stopPolling();
     setComposerEnabled(false);
-
-    if (options.clearOutbox) {
-      outbox = [];
-      clearPersistedOutbox();
-    } else {
-      persistOutbox();
-    }
 
     try {
       if (conn) conn.close();
@@ -421,8 +462,8 @@
     peer = null;
     cryptoKey = null;
     roomCode = "";
-    roomKey = "";
-    role = null;
+    roomHash = "";
+    myPending.clear();
     seenIncoming.clear();
     clearMessages();
     chatEl.hidden = true;
@@ -440,23 +481,12 @@
   }
 
   function becomeHost(hostId) {
-    role = "host";
     peer = createPeer(hostId);
 
     peer.on("open", () => {
       if (destroyed) return;
-      refreshStatus();
-      appendMessage(
-        "Room open. Send messages anytime — they’ll be waiting when your peer joins.",
-        "system"
-      );
-      if (outbox.length) {
-        outbox.forEach((m) => {
-          appendMessage(m.text, "mine", { id: m.id, pending: !m.delivered });
-        });
-        refreshStatus();
-      }
       setComposerEnabled(true);
+      refreshStatus();
     });
 
     peer.on("connection", (c) => {
@@ -480,22 +510,17 @@
 
     peer.on("error", (err) => {
       if (destroyed) return;
-      const type = err && err.type;
-      if (type === "unavailable-id") {
+      if (err && err.type === "unavailable-id") {
         becomeGuest(hostId);
         return;
       }
-      console.error(err);
-      setStatus("Peer error", "is-error");
-      showGateError(err.message || "Could not start peer connection.");
-      destroySession({ clearOutbox: false });
-      chatEl.hidden = true;
-      gateEl.hidden = false;
+      console.warn("PeerJS error (mailbox still works)", err);
+      setComposerEnabled(true);
+      refreshStatus();
     });
 
     peer.on("disconnected", () => {
       if (destroyed) return;
-      setStatus("Reconnecting…", "is-waiting");
       try {
         peer.reconnect();
       } catch (_) {
@@ -527,21 +552,10 @@
       }
       peer = null;
     }
-    role = "guest";
     peer = createPeer();
 
     peer.on("open", () => {
       if (destroyed) return;
-      setStatus("Connecting to peer…", "is-waiting");
-      appendMessage(
-        "Joining… You can write now; messages wait if the link isn’t ready yet.",
-        "system"
-      );
-      if (outbox.length) {
-        outbox.forEach((m) => {
-          appendMessage(m.text, "mine", { id: m.id, pending: !m.delivered });
-        });
-      }
       setComposerEnabled(true);
       tryGuestConnect(hostId);
       stopGuestRetry();
@@ -551,37 +565,26 @@
           return;
         }
         tryGuestConnect(hostId);
-        refreshStatus();
-      }, 4000);
-    });
-
-    peer.on("error", (err) => {
-      if (destroyed) return;
-      console.error(err);
-      setStatus("Could not reach peer yet", "is-waiting");
-      setComposerEnabled(true);
+      }, 5000);
       refreshStatus();
     });
 
-    peer.on("disconnected", () => {
+    peer.on("error", () => {
       if (destroyed) return;
-      setStatus("Reconnecting…", "is-waiting");
-      try {
-        peer.reconnect();
-      } catch (_) {
-        /* ignore */
-      }
+      setComposerEnabled(true);
+      refreshStatus();
     });
   }
 
   async function enterRoom(code) {
     destroyed = false;
     roomCode = code;
-    roomKey = await sha256Hex("cipher-room:" + code);
+    clientId = getClientId();
+    roomHash = await sha256Hex("cipher-room:" + code);
     cryptoKey = await deriveAesKey(code);
     const hostId = await deriveHostPeerId(code);
 
-    loadOutbox();
+    myPending.clear();
     seenIncoming.clear();
 
     gateEl.hidden = true;
@@ -589,10 +592,16 @@
     chatTitle.textContent = code;
     clearMessages();
     setComposerEnabled(false);
-    refreshStatus();
     showGateError("");
+    appendMessage(
+      "Mailbox ready. You can send and leave — they’ll get messages when they open this room.",
+      "system"
+    );
 
+    startPolling();
     becomeHost(hostId);
+    setComposerEnabled(true);
+    refreshStatus();
   }
 
   joinForm.addEventListener("submit", async (e) => {
@@ -611,48 +620,50 @@
     } catch (err) {
       console.error(err);
       showGateError(err.message || "Failed to enter room.");
-      destroySession({ clearOutbox: false });
+      destroySession();
     } finally {
       joinBtn.disabled = false;
     }
   });
 
   leaveBtn.addEventListener("click", () => {
-    // Leaving clears the conversation; undelivered outbox is also cleared (secret chat)
-    destroySession({ clearOutbox: true });
+    // Local UI clears; undelivered ciphertext stays in mailbox for the peer
+    destroySession();
   });
 
   sendForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = messageInput.value.trim();
-    if (!text || !cryptoKey) return;
+    if (!text || !cryptoKey || !roomHash) return;
 
     try {
       const payload = await encryptText(text);
-      const entry = {
-        id: payload.id,
-        text: text,
-        payload: payload,
-        delivered: false,
-      };
-      outbox.push(entry);
-      persistOutbox();
-      appendMessage(text, "mine", { id: entry.id, pending: true });
+      myPending.set(payload.id, { id: payload.id, text: text, delivered: false });
+      appendMessage(text, "mine", { id: payload.id, pending: true });
       messageInput.value = "";
       messageInput.focus();
 
-      if (isPeerLive()) {
-        sendPacket(payload);
+      try {
+        await mailboxPost(payload);
+        mailboxOk = true;
+      } catch (err) {
+        console.error(err);
+        mailboxOk = false;
+        appendMessage("Could not reach mailbox. Message kept locally only for now.", "system");
       }
+
+      // Fast path if peer is live
+      sendPacket(payload);
       refreshStatus();
     } catch (err) {
       console.error(err);
-      appendMessage("Failed to send encrypted message.", "system");
+      appendMessage("Failed to encrypt/send message.", "system");
     }
   });
 
   window.addEventListener("beforeunload", () => {
-    persistOutbox();
+    stopPolling();
+    stopGuestRetry();
     try {
       if (conn) conn.close();
     } catch (_) {
