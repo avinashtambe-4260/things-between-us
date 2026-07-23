@@ -52,6 +52,32 @@
       .replace(/\s+/g, "-");
   }
 
+  function isValidAccessCode(code) {
+    return code.startsWith("14") && code.length >= 5;
+  }
+
+  function scrollThreadToEnd() {
+    requestAnimationFrame(() => {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
+  }
+
+  function syncViewport() {
+    const vv = window.visualViewport;
+    if (vv) {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        Math.max(240, Math.round(vv.height)) + "px"
+      );
+    } else {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        Math.round(window.innerHeight) + "px"
+      );
+    }
+    if (!chatEl.hidden) scrollThreadToEnd();
+  }
+
   function uuid() {
     if (crypto.randomUUID) return crypto.randomUUID();
     return "m-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
@@ -96,25 +122,23 @@
     const pending = [...myPending.values()].filter((m) => !m.delivered).length;
     if (isPeerLive()) {
       if (pending > 0) {
-        setStatus("Live · " + pending + " waiting to be read", "is-ready");
+        setStatus("Live · " + pending + " queued", "is-ready");
       } else {
-        setStatus("Connected (live)", "is-ready");
+        setStatus("Synced", "is-ready");
       }
       return;
     }
     if (!mailboxOk) {
-      setStatus("Mailbox unreachable — retrying…", "is-error");
+      setStatus("Remote unreachable", "is-error");
       return;
     }
     if (pending > 0) {
       setStatus(
-        pending === 1
-          ? "Saved in mailbox — waiting for them"
-          : pending + " messages saved in mailbox",
+        pending === 1 ? "1 comment queued" : pending + " comments queued",
         "is-waiting"
       );
     } else {
-      setStatus("Room open — send anytime", "is-waiting");
+      setStatus("Ready", "is-waiting");
     }
   }
 
@@ -211,9 +235,9 @@
       const meta = document.createElement("span");
       meta.className = "msg-meta";
       if (kind === "mine") {
-        meta.textContent = options.pending ? "You · in mailbox" : "You · read";
+        meta.textContent = options.pending ? "you · pending" : "you";
       } else {
-        meta.textContent = "Peer";
+        meta.textContent = "collaborator";
       }
       el.appendChild(meta);
       const body = document.createElement("span");
@@ -225,7 +249,7 @@
     }
 
     messagesEl.appendChild(el);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollThreadToEnd();
     return el;
   }
 
@@ -240,7 +264,7 @@
       if (el) {
         el.classList.remove("is-pending");
         const meta = el.querySelector(".msg-meta");
-        if (meta) meta.textContent = "You · read";
+        if (meta) meta.textContent = "you";
       }
     });
     refreshStatus();
@@ -316,7 +340,7 @@
           toAck.push(msg.id);
         } catch (err) {
           console.error(err);
-          appendMessage("Could not decrypt a mailbox message.", "system");
+          appendMessage("Could not decrypt a remote note.", "system");
           toAck.push(msg.id);
         }
       }
@@ -401,7 +425,7 @@
         mailboxAck([id]).catch(function () {});
       } catch (err) {
         console.error(err);
-        appendMessage("Could not decrypt a message.", "system");
+        appendMessage("Could not decrypt a note.", "system");
       }
     }
   }
@@ -417,7 +441,7 @@
     conn = c;
 
     c.on("open", () => {
-      appendMessage("Live link up — mailbox still keeps messages if someone leaves.", "system");
+      appendMessage("Live sync connected.", "system");
       refreshStatus();
     });
 
@@ -427,7 +451,7 @@
 
     c.on("close", () => {
       conn = null;
-      appendMessage("Live link closed. Mailbox delivery still works.", "system");
+      appendMessage("Live sync paused — remote queue still active.", "system");
       refreshStatus();
     });
 
@@ -470,10 +494,11 @@
     chatEl.hidden = true;
     gateEl.hidden = false;
     showGateError("");
-    setStatus("Connecting…", "is-waiting");
+    setStatus("Syncing…", "is-waiting");
     joinBtn.disabled = false;
     roomCodeInput.focus();
     destroyed = false;
+    syncViewport();
   }
 
   function createPeer(id) {
@@ -594,23 +619,22 @@
     clearMessages();
     setComposerEnabled(false);
     showGateError("");
-    appendMessage(
-      "Mailbox ready. You can send and leave — they’ll get messages when they open this room.",
-      "system"
-    );
+    appendMessage("Access granted. Comments stay private to this gist.", "system");
+    syncViewport();
 
     startPolling();
     becomeHost(hostId);
     setComposerEnabled(true);
     refreshStatus();
+    scrollThreadToEnd();
   }
 
   joinForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     showGateError("");
     const code = normalizeCode(roomCodeInput.value);
-    if (code.length < 3) {
-      showGateError("Use at least 3 characters after normalizing.");
+    if (!isValidAccessCode(code)) {
+      showGateError("Invalid access code.");
       roomCodeInput.focus();
       return;
     }
@@ -620,7 +644,7 @@
       await enterRoom(code);
     } catch (err) {
       console.error(err);
-      showGateError(err.message || "Failed to enter room.");
+      showGateError(err.message || "Could not open gist.");
       destroySession();
     } finally {
       joinBtn.disabled = false;
@@ -643,6 +667,8 @@
       appendMessage(text, "mine", { id: payload.id, pending: true });
       messageInput.value = "";
       messageInput.focus();
+      syncViewport();
+      scrollThreadToEnd();
 
       try {
         await mailboxPost(payload);
@@ -650,7 +676,7 @@
       } catch (err) {
         console.error(err);
         mailboxOk = false;
-        appendMessage("Could not reach mailbox. Message kept locally only for now.", "system");
+        appendMessage("Could not reach remote. Comment kept locally for now.", "system");
       }
 
       // Fast path if peer is live
@@ -658,9 +684,32 @@
       refreshStatus();
     } catch (err) {
       console.error(err);
-      appendMessage("Failed to encrypt/send message.", "system");
+      appendMessage("Failed to publish comment.", "system");
     }
   });
+
+  messageInput.addEventListener("focus", () => {
+    syncViewport();
+    window.setTimeout(() => {
+      syncViewport();
+      scrollThreadToEnd();
+    }, 300);
+  });
+
+  messageInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (typeof sendForm.requestSubmit === "function") sendForm.requestSubmit();
+      else sendForm.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+    }
+  });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", syncViewport);
+    window.visualViewport.addEventListener("scroll", syncViewport);
+  }
+  window.addEventListener("resize", syncViewport);
+  syncViewport();
 
   window.addEventListener("beforeunload", () => {
     stopPolling();
